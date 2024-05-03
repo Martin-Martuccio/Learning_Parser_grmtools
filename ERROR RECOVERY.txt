@@ -1,0 +1,221 @@
+ERROR RECOVERY
+
+One of lrpar's most powerful features is its approach to error recovery, which can be used with any grammar.
+lrpar implements the CPCT+ error recovery algorithm from Reducing Cascading Parsing Errors Through Fast Error Recovery
+
+Paper : https://www.researchgate.net/publication/324643993_Reducing_Cascading_Parsing_Errors_Through_Fast_Error_Recovery
+
+ It is fast, grammar neutral, and reports multiple repair sequences to users, allowing them to consider which best matches their intentions.
+ It only knows about a language's syntax; it has no concept of the language's semantics beyond that implied by the structure of the grammar.
+ Localize the error and suggest multiple possible corrections (repair sequences) that could allow parsing to continue as if the error had been resolved.
+
+We can do some tweaks to understand a important recovery methode used by CPCT+ algorithm
+
+match res {
+    Some(Ok(r)) => println!("Result: {}", r),
+    _ => eprintln!("Unable to evaluate expression.")
+}
+to:
+
+
+match res {
+    Some(r) => println!("Result: {}", r),                              <== here
+    _ => eprintln!("Unable to evaluate expression.")
+}
+
+In this way the parser will fix with an possible solutione the wrong expression to give a possible results.
+
+>>> 2 + + 3
+Parsing error at line 1 column 5. Repair sequences found:
+   1: Delete +
+   2: Insert INT
+Result: 5
+
+And the first Repair sequences is adopted by the parser to fix evaluate the expression.
+
+Another example:
+
+>>> 2 + 3 4 5
+Parsing error at line 1 column 7. Repair sequences found:
+   1: Insert *, Delete 4
+   2: Insert +, Delete 4
+   3: Delete 4, Delete 5
+   4: Insert *, Shift 4, Delete 5
+   5: Insert *, Shift 4, Insert +
+   6: Insert *, Shift 4, Insert *
+   7: Insert +, Shift 4, Delete 5
+   8: Insert +, Shift 4, Insert +
+   9: Insert +, Shift 4, Insert *
+Result: 17
+
+- Syntax errors and language semantics
+
+But if the error is an 'important' lexeme ? 
+
+>>> 2+
+thread 'main' panicked at 'called `Result::unwrap()` on an `Err` value: Lexeme { start: 2, len: 4294967295, tok_id: 4 }', libcore/result.rs:1009:5
+note: Run with `RUST_BACKTRACE=1` for a backtrace.
+>>> 
+
+Which value can parser/users insert for the evaluation ? i don't know !!!
+
+Thus the expression above caused the expression $lexer.span_str($1.unwrap().span()) to panic, since $1 was Err(<lexeme>).
+
+Solution?
+
+Fortunately, this is generally simpler than it sounds with only a slight rethink in the way that we tend to write a grammar's actions.
+
+- A rule of thumb: have rules return a Result type
+
+Although rules can have any Rust type you can imagine, using a Result type allows a (deliberately) simple interaction with the effects of error recovery. 
+The basic idea is simple:  for lexemes whose value we care about, we either introduce a default value, or percolate an Err upwards. Default values make sense in certain situations.
+
+From this:
+
+Factor -> Result<u64, ()>:
+      '(' Expr ')' { $2 }
+    | 'INT' {
+          let v = $1.map_err(|_| ())?;
+          parse_int($lexer.span_str(v.span()))
+      }
+    ;
+
+To this:
+
+Factor -> Result<u64, ()>:
+      '(' Expr ')' { $2 }
+    | 'INT' { parse_int($lexer.span_str($1.map_err(|_| ())?.span())) }
+    ;
+
+If we encounter an integer lexeme which is the result of error recovery, then the INT lexeme in the second Factor action will be Err(<lexeme>). By writing $1.map_err(|_| ())? 
+we’re saying “if the integer lexeme was created by error recovery, percolate Err(()) upwards”
+
+String as a error information.
+
+ For example, we could remove the panic from parse_int by making the rules have a type Result<u64, String> where the Err case would report a string such as “18446744073709551616 cannot be represented as a u64” 
+ we could have the rules have a type Result<u64, Vec<String>>, though merging together the errors found on the left and right hand sides of the + and * operators requires adding a few lines of code.
+
+-  Making use of %epp for easier to read repair sequences
+For more readable repair sequences we extend the lex file in this way:
+
+From this:
+ 
+ %%
+[0-9]+ "INT"
+\+ "PLUS"
+\* "MUL"
+\( "LBRACK"
+\) "RBRACK"
+[\t ]+ ;
+
+Output:
+
+>>> 2 3
+Parsing error at line 1 column 3. Repair sequences found:
+   1: Delete 3
+   2: Insert PLUS
+   3: Insert MUL
+Result: 2
+
+To this:
+
+%epp PLUS "+"
+%epp MUL "*"
+%epp LBRACK "("
+%epp RBRACK ")"
+%epp INT "Int"
+
+Key word : %epp
+
+To obtain:
+
+>>> 2 3
+Parsing error at line 1 column 3. Repair sequences found:
+   1: Delete 3
+   2: Insert +
+   3: Insert *
+Result: 2
+
+-Biasing repair sequences
+
+In particolar case some repair sequences are better than others. 
+
+Example:
+(1)
+>>> 2 + + 3
+Parsing error at line 1 column 3. Repair sequences found:
+   1: Insert INT
+   2: Delete +
+Unable to evaluate expression.
+
+(2)
+>>> 2 + + 3
+Parsing error at line 1 column 3. Repair sequences found:
+   1: Delete +
+   2: Insert INT
+Result: 5
+
+(2) is better repair sequences because it allow to predict a possible results (avoiding the '+')
+
+We can insert a new directive which causes grmtools to prefer a repair sequences than other. 
+In our case:
+
+%avoid_insert "INT"
+
+With this, the Delete + repair sequence is consistently favoured over Insert INT.
+
+- Turning lexing errors into parsing errors
+
+Lexing error can arise when we insert an element which the evaluator has no lexical rule for the character.
+
+The error is like: 
+
+>>> 2@3
+Lexing error at line 1 column 2.
+
+But i can't understand well the original of the problem.
+
+Solution?
+Fortunately we can fix this easily for nearly all grammars by adding a line similar to this to the end of your .l file:
+
+. "UNMATCHED"
+
+Note that it is vital that this is the last rule in your .l file, and that only a single character is matched, 
+otherwise you will incorrectly lex correct input as UNMATCHED!
+
+To perform that we have to add a new rule in the yacc file.
+
+Unmatched -> ():
+  "UNMATCHED" { } 
+  ;
+
+Prevent Warning:         %expect-unused Unmatched "UNMATCHED"
+
+More accurate error reported:
+
+>>> 2@3+4+5+6@7
+Parsing error at line 1 column 2. Repair sequences found:
+   1: Delete @, Delete 3
+   2: Insert +, Delete @
+   3: Insert *, Delete @
+Parsing error at line 1 column 10. Repair sequences found:
+   1: Insert +, Delete @
+   2: Delete @, Delete 7
+   3: Insert *, Delete @
+Result: 24
+
+In rare case the number of repair sequences is too huge and the CPCT+ algorithm is not able to find a solution.
+
+The repair sequence depends on the cost needed to turn to correct the expression.
+Turning off error recovery:
+
+CTLexerBuilder::new()
+    .lrpar_config(|ctp| {
+        ctp.yacckind(YaccKind::Grmtools)
+            .recoverer(lrpar::RecoveryKind::None)        <======= here
+            .grammar_in_src_dir("calc.y")
+            .unwrap()
+    })
+    .lexer_in_src_dir("calc.l")?
+    .build()?;
+

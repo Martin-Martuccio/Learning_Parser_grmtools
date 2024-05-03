@@ -1,0 +1,22 @@
+[package]
+name = "calcolator_evaluate"
+version = "0.1.0"
+authors = ["Martin Martuccio"]
+edition = "2021"
+
+[[bin]]
+doc = false
+name = "calcolator_evaluate"
+
+[build-dependencies]
+cfgrammar = { path = "../Library_grmtools/grmtools/cfgrammar" }
+lrlex = { path = "../Library_grmtools/grmtools/lrlex" }
+lrpar = { path = "../Library_grmtools/grmtools/lrpar" }
+
+[dependencies]
+cfgrammar = { path = "../Library_grmtools/grmtools/cfgrammar" }
+lrlex = { path = "../Library_grmtools/grmtools/lrlex" }
+lrpar = { path = "../Library_grmtools/grmtools/lrpar" }
+
+
+
